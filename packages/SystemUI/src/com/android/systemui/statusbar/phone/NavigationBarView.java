@@ -16,6 +16,9 @@
 
 package com.android.systemui.statusbar.phone;
 
+import java.io.FileDescriptor;
+import java.io.PrintWriter;
+
 import android.animation.LayoutTransition;
 import android.animation.LayoutTransition.TransitionListener;
 import android.animation.ObjectAnimator;
@@ -34,36 +37,33 @@ import android.database.ContentObserver;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
+import android.hardware.input.InputManager;
 import android.os.Handler;
 import android.os.Message;
 import android.os.PowerManager;
 import android.os.RemoteException;
-import android.os.UserHandle;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.Display;
-import android.view.Gravity;
+import android.view.GestureDetector;
+import android.view.InputDevice;
+import android.view.KeyCharacterMap;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewRootImpl;
 import android.view.WindowManager;
-import android.view.*;
-import android.view.GestureDetector;
 import android.view.inputmethod.InputMethodManager;
-import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 
 import com.android.systemui.R;
 import com.android.systemui.statusbar.policy.DeadZone;
 import com.android.systemui.statusbar.policy.KeyButtonView;
-
-import java.io.FileDescriptor;
-import java.io.PrintWriter;
-import java.util.ArrayList;
 
 public class NavigationBarView extends LinearLayout {
     final static boolean DEBUG = false;
@@ -115,6 +115,23 @@ public class NavigationBarView extends LinearLayout {
     // workaround for LayoutTransitions leaving the nav buttons in a weird state (bug 5549288)
     final static boolean WORKAROUND_INVALID_LAYOUT = true;
     final static int MSG_CHECK_INVALID_LAYOUT = 8686;
+
+    //swipe cursor
+    final static int MIN_DRAG_DISTANCE = 40;
+    final static int MIN_DISTANCE_FOR_FAST = 120;
+
+    private boolean mMovingLeft = false;
+    private boolean mMovingUp= false;
+
+    private int mHapticEnabledStart = 0;
+    private int mTouchSoundsEnabledStart = 0;
+
+    float mX;
+    float mY;
+    float mStartX;
+    float mStartY;
+    boolean alreadySet = false;
+    public boolean inDeleteMode = false;
 
     final static String NAVBAR_EDIT_ACTION = "android.intent.action.NAVBAR_EDIT";
 
@@ -239,8 +256,13 @@ public class NavigationBarView extends LinearLayout {
                 new GestureDetector.SimpleOnGestureListener() {
             @Override
             public boolean onDoubleTap(MotionEvent e) {
-                PowerManager pm = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
-                if (pm != null) pm.goToSleep(e.getEventTime());
+                boolean showImeButton = ((mNavigationIconHints & StatusBarManager.NAVIGATION_HINT_IME_SHOWN) != 0);
+
+                if(showImeButton) {
+                    inDeleteMode = !inDeleteMode;
+                    View mNavBarBG = findViewById(R.id.navbarBG);
+                    mNavBarBG.setBackgroundResource(inDeleteMode ? R.drawable.system_bar_background_red : R.drawable.system_bar_background);
+                }
                 return true;
             }
         });
@@ -279,15 +301,146 @@ public class NavigationBarView extends LinearLayout {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        float x = event.getX();
+        float y = event.getY();
+
+        final boolean showImeButton = ((mNavigationIconHints & StatusBarManager.NAVIGATION_HINT_IME_SHOWN) != 0);
+
+		switch(event.getActionMasked()) {
+		case MotionEvent.ACTION_DOWN:
+//			Log.d(TAG, "action down");
+
+			if(showImeButton) {
+				mHapticEnabledStart = Settings.System.getInt(mContext.getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 0);
+				mTouchSoundsEnabledStart = Settings.System.getInt(mContext.getContentResolver(), Settings.System.SOUND_EFFECTS_ENABLED, 0);
+
+				Log.d(TAG, "Saving haptic feedback as " + mHapticEnabledStart);
+
+				mX = x;
+				mY = y;
+				mStartX = x;
+				mStartY = y;
+			}
+            break;
+		case MotionEvent.ACTION_MOVE:
+//			Log.d(TAG, "action move");
+
+			float dX = Math.abs(x - mX);
+			float dY = Math.abs(y - mY);
+
+			float dXFromStart = Math.abs(x - mStartX);
+			float dYFromStart = Math.abs(y - mStartY);
+
+			if (showImeButton) {
+				if(!alreadySet) {
+					mHapticEnabledStart = Settings.System.getInt(mContext.getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 0);
+					mTouchSoundsEnabledStart = Settings.System.getInt(mContext.getContentResolver(), Settings.System.SOUND_EFFECTS_ENABLED, 0);
+
+//					Log.d(TAG, "Saving haptic feedback in move as " + mHapticEnabledStart);
+					alreadySet = true;
+				}
+
+				int hapticEnabled = Settings.System.getInt(mContext.getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 0);
+				int touchSoundsEnabled = Settings.System.getInt(mContext.getContentResolver(), Settings.System.SOUND_EFFECTS_ENABLED, 0);
+
+				mMovingLeft = mX - x > 0;
+				mMovingUp = mY - y > 0;
+
+
+				int minDragDistance = (dXFromStart >= MIN_DISTANCE_FOR_FAST || dYFromStart >= MIN_DISTANCE_FOR_FAST) ?
+						MIN_DRAG_DISTANCE / 2 : MIN_DRAG_DISTANCE;
+
+				if (dX >= minDragDistance || dY >= minDragDistance) {
+
+					mX = x;
+					mY = y;
+
+					Log.d(TAG, "haptic enabled: " + hapticEnabled);
+
+					if (hapticEnabled == 1) {
+//						mHapticEnabledStart = 1;
+						Log.d(TAG, "Saving haptic feedback as " + mHapticEnabledStart);
+						Settings.System.putInt(mContext.getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 0);
+						Log.d(TAG, "haptic switched to : " + Settings.System.getInt(mContext.getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, 0));
+					}
+
+					if (touchSoundsEnabled == 1) {
+//						mTouchSoundsEnabledStart = 1;
+						Settings.System.putInt(mContext.getContentResolver(), Settings.System.SOUND_EFFECTS_ENABLED, 0);
+					}
+
+					boolean isLandscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+
+					if(showImeButton) {
+						if(!inDeleteMode) {
+							int moveDirection = (mMovingLeft && !isLandscape) || (mMovingUp && isLandscape) ? KeyEvent.KEYCODE_DPAD_LEFT : KeyEvent.KEYCODE_DPAD_RIGHT;
+						    final int repeatCount = (KeyEvent.FLAG_SOFT_KEYBOARD
+						            | KeyEvent.FLAG_KEEP_TOUCH_MODE & KeyEvent.FLAG_LONG_PRESS) != 0 ? 1 : 0;
+
+					        final KeyEvent ev = new KeyEvent(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(),
+                                    KeyEvent.ACTION_DOWN, moveDirection, repeatCount,
+					                0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+					                KeyEvent.FLAG_VIRTUAL_HARD_KEY | KeyEvent.FLAG_KEEP_TOUCH_MODE |
+					                KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
+					                InputDevice.SOURCE_KEYBOARD);
+
+					        InputManager.getInstance().injectInputEvent(ev,
+					                InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
+						} else {
+							//delete w swipe here
+							int deleteDirection = (mMovingLeft && !isLandscape) || (mMovingUp && isLandscape) ? KeyEvent.KEYCODE_DEL : KeyEvent.KEYCODE_FORWARD_DEL;
+						    final int repeatCount = (KeyEvent.FLAG_SOFT_KEYBOARD
+						            | KeyEvent.FLAG_KEEP_TOUCH_MODE & KeyEvent.FLAG_LONG_PRESS) != 0 ? 1 : 0;
+
+					        final KeyEvent ev = new KeyEvent(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(),
+                                    KeyEvent.ACTION_DOWN, deleteDirection, repeatCount,
+					                0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+					                KeyEvent.FLAG_VIRTUAL_HARD_KEY | KeyEvent.FLAG_KEEP_TOUCH_MODE |
+					                KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
+					                InputDevice.SOURCE_KEYBOARD);
+
+					        InputManager.getInstance().injectInputEvent(ev,
+					                InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
+						}
+					}
+				}
+			}
+			break;
+		case MotionEvent.ACTION_UP:
+		case MotionEvent.ACTION_CANCEL:
+			if(showImeButton){
+//				Log.d(TAG, "action up");
+//				Log.d(TAG, "Setting the haptic feedback back to "+ mHapticEnabledStart);
+				Settings.System.putInt(mContext.getContentResolver(), Settings.System.HAPTIC_FEEDBACK_ENABLED, mHapticEnabledStart);
+				Settings.System.putInt(mContext.getContentResolver(), Settings.System.SOUND_EFFECTS_ENABLED, mTouchSoundsEnabledStart);
+				alreadySet = false;
+
+				if(inDeleteMode) {
+					final KeyEvent ev = new KeyEvent(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(),
+							KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL, 0,
+							0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+							KeyEvent.FLAG_CANCELED,
+							InputDevice.SOURCE_KEYBOARD);
+
+					InputManager.getInstance().injectInputEvent(ev,
+							InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
+				}
+			}
+			break;
+		}
+
+
         if (!mInEditMode && mTaskSwitchHelper.onTouchEvent(event)) {
             return true;
         }
         if (mDeadZone != null && event.getAction() == MotionEvent.ACTION_OUTSIDE) {
             mDeadZone.poke(event);
         }
-        if (Settings.System.getInt(mContext.getContentResolver(),
-                    Settings.System.DOUBLE_TAP_SLEEP_NAVBAR, 0) == 1)
-            mDoubleTapGesture.onTouchEvent(event);
+
+//        if (Settings.System.getInt(mContext.getContentResolver(),
+//        		Settings.System.DOUBLE_TAP_SLEEP_NAVBAR, 1) == 1)
+          mDoubleTapGesture.onTouchEvent(event);
+
 
         return super.onTouchEvent(event);
     }
@@ -346,6 +499,14 @@ public class NavigationBarView extends LinearLayout {
     public void notifyScreenOn(boolean screenOn) {
         mScreenOn = screenOn;
         setDisabledFlags(mDisabledFlags, true);
+    }
+
+    public void exitDeleteMode() {
+        if(inDeleteMode){
+            inDeleteMode = false;
+            View mNavBarBG = findViewById(R.id.navbarBG);
+            mNavBarBG.setBackgroundResource(R.drawable.system_bar_background);
+        }
     }
 
     public void setNavigationIconHints(int hints) {
@@ -567,7 +728,6 @@ public class NavigationBarView extends LinearLayout {
         mCurrentView = mRotatedViews[Surface.ROTATION_0];
 
         getImeSwitchButton().setOnClickListener(mImeSwitcherClickListener);
-
         updateRTLOrder();
     }
 
@@ -880,7 +1040,6 @@ public class NavigationBarView extends LinearLayout {
             resolver.registerContentObserver(
                     Settings.System.getUriFor(Settings.System.NAVIGATION_BAR_MENU_ARROW_KEYS),
                     false, this);
-
             // intialize mModlockDisabled
             onChange(false);
         }
